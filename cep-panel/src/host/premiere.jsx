@@ -2362,7 +2362,13 @@ function addSequenceMarker(paramsJson) {
             }
             if (name !== "") newMarker.name = name;
             if (comment !== "") newMarker.comments = comment;
-            if (color >= 0) newMarker.colorIndex = color;
+            if (color >= 0) {
+                if (newMarker.setColorByIndex) {
+                    newMarker.setColorByIndex(color);
+                } else {
+                    newMarker.colorIndex = color;
+                }
+            }
             if (duration > 0) {
                 newMarker.end = _secondsToTime(time + duration);
             }
@@ -5396,6 +5402,95 @@ function importCaptions(filePath, format) {
     } catch (e) { return _err("importCaptions failed: " + e.message); }
 }
 
+function _parseEvalArgs(argsJson) {
+    if (argsJson === undefined || argsJson === null || argsJson === "") return {};
+    if (typeof argsJson === "object") return argsJson;
+    var o = _tryParseJSONObjectString(String(argsJson));
+    if (o) return o;
+    try { return JSON.parse(String(argsJson)); } catch (e) { return {}; }
+}
+
+function _getSequenceFps(seq) {
+    var fps = parseFloat(seq.timebase);
+    if (!fps || isNaN(fps) || fps <= 0) fps = 30;
+    return fps;
+}
+
+function _secondsToTimecode(seconds, fps) {
+    var rate = fps > 0 ? fps : 30;
+    var totalFrames = Math.max(0, Math.round(parseFloat(seconds) * rate));
+    var h = Math.floor(totalFrames / (rate * 3600));
+    var m = Math.floor((totalFrames % (rate * 3600)) / (rate * 60));
+    var s = Math.floor((totalFrames % (rate * 60)) / rate);
+    var f = totalFrames % rate;
+    function pad2(n) { return (n < 10 ? "0" : "") + n; }
+    return pad2(h) + ":" + pad2(m) + ":" + pad2(s) + ":" + pad2(f);
+}
+
+function _extractCaptionClipText(clip) {
+    if (!clip) return "";
+    var text = clip.name || "";
+    var tryMgt = !text || /\.(mp4|mov|mxf|wav|mp3|m4a|aac)$/i.test(text);
+    if (tryMgt && clip.getMGTComponent) {
+        try {
+            var comp = clip.getMGTComponent();
+            if (comp && comp.properties) {
+                for (var pi = 0; pi < comp.properties.numItems; pi++) {
+                    var p = comp.properties[pi];
+                    var dn = (p.displayName || "").toLowerCase();
+                    if (dn === "source text" || dn === "text" || dn.indexOf("caption") >= 0) {
+                        try {
+                            var val = p.getValue();
+                            if (val !== undefined && val !== null && String(val).replace(/\s/g, "").length > 0) {
+                                text = String(val);
+                                break;
+                            }
+                        } catch (pe) { continue; }
+                    }
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }
+    return String(text || "").replace(/^\s+|\s+$/g, "");
+}
+
+function _collectSequenceCaptions(seq, trackIndex) {
+    var captions = [];
+    if (!seq.captionTracks || seq.captionTracks.numTracks === 0) return captions;
+    var startTrack = 0;
+    var endTrack = seq.captionTracks.numTracks - 1;
+    if (trackIndex !== undefined && trackIndex !== null && trackIndex !== "") {
+        var ti = parseInt(trackIndex, 10);
+        if (!isNaN(ti) && ti >= 0 && ti < seq.captionTracks.numTracks) {
+            startTrack = ti;
+            endTrack = ti;
+        }
+    }
+    for (var t = startTrack; t <= endTrack; t++) {
+        var ct = seq.captionTracks[t];
+        if (!ct || !ct.clips) continue;
+        for (var ci = 0; ci < ct.clips.numItems; ci++) {
+            var c = ct.clips[ci];
+            var text = _extractCaptionClipText(c);
+            if (!text) continue;
+            captions.push({
+                trackIndex: t,
+                index: ci,
+                text: text,
+                speaker: "Unknown",
+                startSeconds: _timeToSeconds(c.start),
+                endSeconds: _timeToSeconds(c.end),
+                duration: _timeToSeconds(c.duration)
+            });
+        }
+    }
+    captions.sort(function (a, b) {
+        if (a.startSeconds !== b.startSeconds) return a.startSeconds - b.startSeconds;
+        return a.trackIndex - b.trackIndex;
+    });
+    return captions;
+}
+
 function getCaptions(trackIndex) {
     try {
         if (!app.project) return _err("No project is open");
@@ -5405,7 +5500,19 @@ function getCaptions(trackIndex) {
         var captions = [];
         if (seq.captionTracks && trackIndex < seq.captionTracks.numTracks) {
             var ct = seq.captionTracks[trackIndex];
-            if (ct && ct.clips) { for (var ci = 0; ci < ct.clips.numItems; ci++) { var c = ct.clips[ci]; captions.push({ index: ci, text: c.name || "", startSeconds: _timeToSeconds(c.start), endSeconds: _timeToSeconds(c.end), duration: _timeToSeconds(c.duration) }); } }
+            if (ct && ct.clips) {
+                for (var ci = 0; ci < ct.clips.numItems; ci++) {
+                    var c = ct.clips[ci];
+                    captions.push({
+                        index: ci,
+                        text: _extractCaptionClipText(c),
+                        startSeconds: _timeToSeconds(c.start),
+                        endSeconds: _timeToSeconds(c.end),
+                        duration: _timeToSeconds(c.duration)
+                    });
+                }
+            }
+        } else if (trackIndex < seq.videoTracks.numTracks) {
         } else if (trackIndex < seq.videoTracks.numTracks) {
             var vt = seq.videoTracks[trackIndex];
             if (vt && vt.clips) { for (var vc = 0; vc < vt.clips.numItems; vc++) { var v = vt.clips[vc]; captions.push({ index: vc, text: v.name || "", startSeconds: _timeToSeconds(v.start), endSeconds: _timeToSeconds(v.end), duration: _timeToSeconds(v.duration) }); } }
@@ -5489,6 +5596,111 @@ function exportCaptions(outputPath, format) {
         var f = new File(outputPath); f.open("w"); f.write(content); f.close();
         return _ok({ outputPath: outputPath, format: format, captionCount: captions.length, exported: true });
     } catch (e) { return _err("exportCaptions failed: " + e.message); }
+}
+
+/**
+ * Caption-track fallback for premiere_export_sequence_transcript on Premiere 24.x
+ * (and when the UXP Text-panel bridge is unavailable). Requires captions created
+ * from Speech-to-Text via Text > Create Captions (or an imported caption track).
+ */
+function exportSequenceTranscript(argsJson) {
+    try {
+        var args = _parseEvalArgs(argsJson);
+        var outputPath = args.outputPath || args.output_path || "";
+        var format = String(args.format || "prtranscript").toLowerCase();
+        var speakerLabel = args.speakerLabel || args.speaker_label || "Unknown";
+        var trackIndex = args.trackIndex !== undefined ? args.trackIndex : args.track_index;
+
+        if (!outputPath || outputPath === "") return _err("outputPath is required");
+        if (!app.project) return _err("No project is open");
+        var seq = app.project.activeSequence;
+        if (!seq) return _err("No active sequence");
+
+        var fps = _getSequenceFps(seq);
+        var captions = _collectSequenceCaptions(seq, trackIndex);
+        var seqDuration = _timeToSeconds(seq.end);
+
+        // Drop a single full-span caption whose text looks like a source media filename.
+        if (captions.length === 1 && seqDuration > 0) {
+            var lone = captions[0];
+            if ((lone.endSeconds - lone.startSeconds) >= seqDuration * 0.9 &&
+                /\.(mp4|mov|mxf|wav|mp3|m4a|aac)$/i.test(lone.text)) {
+                captions = [];
+            }
+        }
+
+        if (captions.length === 0) {
+            return _err(
+                "No caption-track transcript found on the active sequence. " +
+                "In Text > Transcript, use Create Captions (or add a caption track), then retry. " +
+                "On Premiere 25.0+, the UXP bridge can export Text-panel transcripts without captions."
+            );
+        }
+
+        var segments = [];
+        for (var i = 0; i < captions.length; i++) {
+            var cap = captions[i];
+            segments.push({
+                startSeconds: cap.startSeconds,
+                endSeconds: cap.endSeconds,
+                speaker: speakerLabel || cap.speaker || "Unknown",
+                text: cap.text
+            });
+        }
+
+        var content;
+        if (format === "json") {
+            content = JSON.stringify({
+                sequenceName: seq.name || "",
+                fps: fps,
+                segmentCount: segments.length,
+                segments: segments,
+                stats: {
+                    captionCount: captions.length,
+                    captionTrackCount: seq.captionTracks ? seq.captionTracks.numTracks : 0,
+                    source: "caption_tracks"
+                }
+            }, null, 2);
+        } else if (format === "text" || format === "txt") {
+            var plain = [];
+            for (var ti = 0; ti < segments.length; ti++) {
+                var seg = segments[ti];
+                plain.push("[" + seg.startSeconds.toFixed(3) + "] " + seg.speaker + ": " + seg.text);
+            }
+            content = plain.join("\n").trim() + (plain.length ? "\n" : "");
+        } else {
+            var lines = [];
+            for (var pi = 0; pi < segments.length; pi++) {
+                var s = segments[pi];
+                if (!s.text) continue;
+                lines.push(_secondsToTimecode(s.startSeconds, fps) + " - " + _secondsToTimecode(s.endSeconds, fps));
+                lines.push(s.speaker || speakerLabel || "Unknown");
+                lines.push(s.text);
+                lines.push("");
+            }
+            content = lines.join("\n").trim() + (lines.length ? "\n" : "");
+        }
+
+        var outFile = new File(outputPath);
+        outFile.encoding = "UTF-8";
+        if (!outFile.parent.exists) outFile.parent.create();
+        if (!outFile.open("w")) return _err("Failed to open output file: " + outputPath);
+        outFile.write(content);
+        outFile.close();
+
+        return _ok({
+            outputPath: outputPath,
+            format: format,
+            segmentCount: segments.length,
+            sequenceName: seq.name || "",
+            fps: fps,
+            captionCount: captions.length,
+            captionTrackCount: seq.captionTracks ? seq.captionTracks.numTracks : 0,
+            source: "caption_tracks",
+            uxpTranscriptApi: false,
+            note: "Exported from caption tracks (CEP fallback). Create captions from Text > Transcript for best parity with Text-panel export."
+        });
+    } catch (e) { return _err("exportSequenceTranscript failed: " + e.message); }
 }
 
 function styleCaptions(trackIndex, font, size, color, bgColor, position) {
