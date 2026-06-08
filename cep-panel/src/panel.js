@@ -376,6 +376,11 @@
             if (ci === undefined || ci === null) ci = 0;
             return fn + "(" + Number(ti) + "," + Number(ci) + "," + escapeForEval(pn) + "," + escapeForEval(val) + ")";
         }
+        if (fn === "exportFrame") {
+            var outPath = po.output_path || po.outputPath || "";
+            var imgFmt = po.format || "PNG";
+            return fn + "(" + escapeForEval(outPath) + "," + escapeForEval(imgFmt) + ")";
+        }
         return null;
     }
 
