@@ -225,8 +225,9 @@ export class CepBridge implements PremiereBridge {
           ws.terminate();
           this.log.warn(
             `Connection to CEP panel at ${this.wsUrl} timed out. ` +
-              "Bridge will operate in disconnected mode.",
+              "Bridge will operate in disconnected mode until CEP is available.",
           );
+          this.scheduleReconnect();
           resolve();
         }
       }, this.commandTimeoutMs);
@@ -283,8 +284,9 @@ export class CepBridge implements PremiereBridge {
           clearTimeout(connectionTimeout);
           this.log.warn(
             `Could not connect to CEP panel: ${err.message}. ` +
-              "Bridge will operate in disconnected mode.",
+              "Bridge will operate in disconnected mode until CEP is available.",
           );
+          this.scheduleReconnect();
           resolve();
         } else {
           this.log.error(`WebSocket error: ${err.message}`);
